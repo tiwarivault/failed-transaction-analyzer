@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AI Failed Transaction Analyzer</title>
+<style>
+  :root{
+    --bg:#0f1220; --card:#171a2b; --muted:#9aa3b2; --text:#e9ecf3;
+    --accent:#5b8cff; --accent2:#22c55e; --border:#262b40; --chip:#1e2238;
+    --danger:#ef4444; --warn:#fbbf24;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);line-height:1.5}
+  .wrap{max-width:900px;margin:0 auto;padding:24px 16px 60px}
+  header h1{font-size:26px;margin:0 0 4px}
+  header p{color:var(--muted);margin:0 0 18px}
+  .badge{display:inline-block;background:var(--chip);color:var(--muted);font-size:12px;padding:3px 10px;border-radius:999px;margin-right:6px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px;margin-bottom:16px}
+  label{display:block;font-size:13px;color:var(--muted);margin-bottom:6px}
+  input[type=file],textarea,select,input[type=password],input[type=text]{width:100%;background:#0e1120;color:var(--text);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font-size:14px;font-family:inherit}
+  textarea{min-height:90px;resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:13px}
+  .row{display:flex;gap:10px;flex-wrap:wrap}
+  .row>*{flex:1;min-width:150px}
+  button{cursor:pointer;border:none;border-radius:10px;padding:10px 16px;font-size:15px;font-weight:600}
+  .btn-primary{background:var(--accent);color:#fff}
+  .btn-ghost{background:var(--chip);color:var(--text);border:1px solid var(--border)}
+  .btn-ai{background:linear-gradient(90deg,#7c3aed,#5b8cff);color:#fff}
+  .tiles{display:flex;gap:12px;flex-wrap:wrap;margin:4px 0 14px}
+  .tile{flex:1;min-width:130px;background:#0e1120;border:1px solid var(--border);border-radius:12px;padding:14px}
+  .tile .n{font-size:26px;font-weight:700}
+  .tile .l{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+  .tile.red .n{color:var(--danger)} .tile.green .n{color:var(--accent2)} .tile.blue .n{color:var(--accent)}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border)}
+  th{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .bar{height:8px;background:var(--accent);border-radius:999px;min-width:2px}
+  .barcell{width:34%}
+  .muted{color:var(--muted)} .small{font-size:13px}
+  details summary{cursor:pointer;color:var(--accent);font-size:14px}
+  .ai-box{white-space:pre-wrap;background:#0e1120;border:1px solid var(--border);border-radius:10px;padding:14px;margin-top:10px}
+  .spinner{display:inline-block;width:16px;height:16px;border:2px solid #fff6;border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;vertical-align:-3px;margin-right:6px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .err{color:var(--danger);font-size:13px;margin-top:8px}
+  footer{color:var(--muted);font-size:13px;text-align:center;margin-top:30px}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>📊 AI Failed Transaction Analyzer</h1>
+    <p>Upload a transactions CSV — instantly see the failure breakdown, success rate, and (optionally) AI-written insights. Replaces the manual pivot-table + VLOOKUP grind.</p>
+    <span class="badge">CSV analysis</span><span class="badge">+ AI insights (Claude)</span>
+  </header>
+
+  <!-- INPUT -->
+  <div class="card">
+    <label>Upload transactions CSV (needs a status column and/or a failure-reason column)</label>
+    <input type="file" id="file" accept=".csv,text/csv" onchange="loadFile(event)" />
+    <div class="row" style="margin-top:12px">
+      <button class="btn-ghost" onclick="loadSample()">Load sample data</button>
+      <button class="btn-ghost" onclick="clearAll()">Clear</button>
+    </div>
+    <details style="margin-top:12px">
+      <summary>…or paste CSV text</summary>
+      <textarea id="paste" placeholder="status,failure_reason&#10;failed,Insufficient funds&#10;success,&#10;failed,Do not honour"></textarea>
+      <button class="btn-ghost" style="margin-top:8px" onclick="loadPaste()">Analyze pasted CSV</button>
+    </details>
+  </div>
+
+  <!-- COLUMN MAPPING -->
+  <div class="card" id="mapCard" style="display:none">
+    <div class="row">
+      <div>
+        <label>Status column</label>
+        <select id="statusCol" onchange="analyze()"></select>
+      </div>
+      <div>
+        <label>Failure reason column</label>
+        <select id="reasonCol" onchange="analyze()"></select>
+      </div>
+    </div>
+    <p class="small muted" style="margin-top:8px">Auto-detected — change if the columns are wrong. A row counts as "failed" when its status looks like fail/declined/error/cancelled/rejected (or, with no status column, when it has a reason).</p>
+  </div>
+
+  <!-- RESULTS -->
+  <div id="out"></div>
+</div>
+
+<script>
+let ROWS = [];      // array of objects
+let HEADERS = [];   // column names
+
+/* ---------- CSV PARSER (handles basic quoted fields) ---------- */
+function parseCSV(text){
+  const rows = [];
+  let i=0, field='', row=[], inQ=false;
+  text = text.replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  while(i < text.length){
+    const c = text[i];
+    if(inQ){
+      if(c === '"'){ if(text[i+1] === '"'){ field+='"'; i++; } else inQ=false; }
+      else field += c;
+    } else {
+      if(c === '"') inQ = true;
+      else if(c === ',') { row.push(field); field=''; }
+      else if(c === '\n'){ row.push(field); rows.push(row); row=[]; field=''; }
+      else field += c;
+    }
+    i++;
+  }
+  if(field.length || row.length){ row.push(field); rows.push(row); }
+  return rows.filter(r => r.length && !(r.length===1 && r[0].trim()===''));
+}
+
+function toObjects(matrix){
+  if(!matrix.length) return {headers:[], rows:[]};
+  const headers = matrix[0].map(h => h.trim());
+  const rows = matrix.slice(1).map(r => {
+    const o = {}; headers.forEach((h,idx)=> o[h] = (r[idx]!==undefined?r[idx]:'').trim()); return o;
+  });
+  return {headers, rows};
+}
+
+/* ---------- LOADERS ---------- */
+function loadFile(e){
+  const f = e.target.files[0]; if(!f) return;
+  const reader = new FileReader();
+  reader.onload = () => ingest(reader.result);
+  reader.readAsText(f);
+}
+function loadPaste(){ const t=document.getElementById('paste').value.trim(); if(t) ingest(t); }
+function loadSample(){ ingest(SAMPLE); }
+function clearAll(){ ROWS=[]; HEADERS=[]; document.getElementById('mapCard').style.display='none'; document.getElementById('out').innerHTML=''; document.getElementById('file').value=''; }
+
+function ingest(text){
+  const {headers, rows} = toObjects(parseCSV(text));
+  if(!headers.length){ document.getElementById('out').innerHTML = `<div class="card err">Couldn't read any columns. Check the CSV format.</div>`; return; }
+  HEADERS = headers; ROWS = rows;
+  // populate selects + auto-detect
+  const sSel = document.getElementById('statusCol'), rSel = document.getElementById('reasonCol');
+  sSel.innerHTML = `<option value="">(none)</option>` + headers.map(h=>`<option>${escapeHtml(h)}</option>`).join('');
+  rSel.innerHTML = `<option value="">(none)</option>` + headers.map(h=>`<option>${escapeHtml(h)}</option>`).join('');
+  sSel.value = detect(headers, ['status','state','txn_status','payment_status']) || '';
+  rSel.value = detect(headers, ['failure_reason','reason','error','error_message','message','remark','remarks','decline_reason']) || '';
+  document.getElementById('mapCard').style.display='block';
+  analyze();
+}
+function detect(headers, candidates){
+  const low = headers.map(h=>h.toLowerCase());
+  for(const c of candidates){ const i = low.indexOf(c); if(i>=0) return headers[i]; }
+  for(let i=0;i<low.length;i++){ if(candidates.some(c=>low[i].includes(c))) return headers[i]; }
+  return null;
+}
+
+const FAIL_WORDS = ['fail','declin','error','cancel','reject','unsuccess','not captured','reversed','timeout','timed out'];
+function isFailed(statusVal, reasonVal){
+  const s = (statusVal||'').toLowerCase();
+  if(s){ return FAIL_WORDS.some(w=>s.includes(w)); }
+  // no status column: treat rows with a non-empty reason as failures
+  return (reasonVal||'').trim() !== '';
+}
+
+/* ---------- ANALYZE ---------- */
+function analyze(){
+  if(!ROWS.length) return;
+  const sCol = document.getElementById('statusCol').value;
+  const rCol = document.getElementById('reasonCol').value;
+  const total = ROWS.length;
+  let failed = 0; const byReason = {};
+  for(const r of ROWS){
+    const f = isFailed(sCol? r[sCol] : '', rCol? r[rCol] : '');
+    if(f){
+      failed++;
+      let reason = rCol ? (r[rCol]||'').trim() : '';
+      if(!reason) reason = sCol ? (r[sCol]||'Unknown').trim() : 'Unknown';
+      if(!reason) reason = 'Unknown';
+      byReason[reason] = (byReason[reason]||0) + 1;
+    }
+  }
+  const success = total - failed;
+  const sr = total ? ((success/total)*100).toFixed(1) : '0';
+  const list = Object.entries(byReason).sort((a,b)=>b[1]-a[1]);
+  const maxCount = list.length ? list[0][1] : 1;
+
+  let rowsHtml = list.map(([reason,count])=>{
+    const pct = failed ? ((count/failed)*100).toFixed(1) : 0;
+    const w = Math.round((count/maxCount)*100);
+    return `<tr>
+      <td>${escapeHtml(reason)}</td>
+      <td class="num">${count}</td>
+      <td class="num">${pct}%</td>
+      <td class="barcell"><div class="bar" style="width:${w}%"></div></td>
+    </tr>`;
+  }).join('');
+  if(!list.length) rowsHtml = `<tr><td colspan="4" class="muted">No failed transactions found with the selected columns.</td></tr>`;
+
+  // keep last summary for AI
+  window.__summary = {total, failed, success, sr, list};
+
+  document.getElementById('out').innerHTML = `
+  <div class="card">
+    <div class="tiles">
+      <div class="tile blue"><div class="n">${total}</div><div class="l">Total txns</div></div>
+      <div class="tile red"><div class="n">${failed}</div><div class="l">Failed</div></div>
+      <div class="tile green"><div class="n">${sr}%</div><div class="l">Success rate</div></div>
+    </div>
+    <h3 style="margin:6px 0 10px">Failure breakdown (by reason)</h3>
+    <table>
+      <thead><tr><th>Reason</th><th class="num">Count</th><th class="num">% of failures</th><th>&nbsp;</th></tr></thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+    <details style="margin-top:14px">
+      <summary>🤖 Get AI insights &amp; recommendations (Claude)</summary>
+      <div style="margin-top:10px">
+        <label>Anthropic API key (stored only in your browser)</label>
+        <input type="password" id="key" placeholder="sk-ant-..." oninput="saveKey()" />
+        <input type="text" id="model" value="claude-haiku-5-5" style="margin-top:8px" />
+        <button class="btn-ai" style="margin-top:10px" onclick="askAI()"><span id="aibtn">🤖 Analyze with AI</span></button>
+        <div id="aiout"></div>
+      </div>
+    </details>
+  </div>`;
+  try{ const k=localStorage.getItem('anthropic_key'); if(k) document.getElementById('key').value=k; }catch(e){}
+}
+
+/* ---------- AI INSIGHTS ---------- */
+function saveKey(){ try{ localStorage.setItem('anthropic_key', document.getElementById('key').value); }catch(e){} }
+
+async function askAI(){
+  const s = window.__summary; if(!s){ return; }
+  const key = document.getElementById('key').value.trim();
+  const model = document.getElementById('model').value.trim() || 'claude-haiku-5-5';
+  const aiout = document.getElementById('aiout'); const btn = document.getElementById('aibtn');
+  if(!key){ aiout.innerHTML = `<div class="err">Please add your Anthropic API key above.</div>`; return; }
+  btn.innerHTML = `<span class="spinner"></span>Analyzing...`; aiout.innerHTML='';
+
+  const breakdown = s.list.map(([r,c])=>`${r}: ${c} (${((c/s.failed)*100).toFixed(1)}% of failures)`).join('\n');
+  const prompt =
+`You are a senior payments support engineer. Here is a failed-transaction breakdown:
+Total transactions: ${s.total}, Failed: ${s.failed}, Success rate: ${s.sr}%.
+Failure reasons:
+${breakdown}
+
+Write a short analysis for the support/merchant team:
+1) The top 2-3 issues to prioritise and why (impact).
+2) For each, whether it's typically customer, merchant/integration, or bank/PSP-side.
+3) Concrete next steps to reduce failures.
+Keep it under 180 words, practical, bullet points.`;
+
+  try{
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST',
+      headers:{'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({ model, max_tokens:600, messages:[{role:'user', content:prompt}] })
+    });
+    const data = await res.json();
+    if(!res.ok){ aiout.innerHTML = `<div class="err">API error (${res.status}): ${escapeHtml((data.error&&data.error.message)||JSON.stringify(data))}</div>`; }
+    else { const text=(data.content&&data.content[0]&&data.content[0].text)||'No response.'; aiout.innerHTML = `<div class="ai-box">${escapeHtml(text)}</div>`; }
+  }catch(err){ aiout.innerHTML = `<div class="err">Request failed: ${escapeHtml(err.message)} (check key/model).</div>`; }
+  finally{ btn.innerHTML = `🤖 Analyze with AI`; }
+}
+
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+/* ---------- SAMPLE DATA ---------- */
+const SAMPLE = `order_id,amount,status,failure_reason,payment_mode
+1001,1999,success,,UPI
+1002,499,failed,Insufficient funds,Card
+1003,2500,success,,Netbanking
+1004,150,failed,Do not honour,Card
+1005,799,failed,Customer dropped / not attempted,UPI
+1006,1200,success,,UPI
+1007,350,failed,Insufficient funds,Card
+1008,5000,failed,3DS authentication failed,Card
+1009,99,success,,Wallet
+1010,640,failed,Do not honour,Card
+1011,1800,failed,Transaction timed out,Netbanking
+1012,2200,success,,UPI
+1013,450,failed,Invalid VPA,UPI
+1014,760,failed,Insufficient funds,Card
+1015,999,success,,Card
+1016,1299,failed,Customer dropped / not attempted,UPI
+1017,320,failed,3DS authentication failed,Card
+1018,2750,success,,Netbanking
+1019,180,failed,Do not honour,Card
+1020,600,failed,Transaction timed out,UPI
+1021,1450,success,,UPI
+1022,890,failed,Insufficient funds,Card
+1023,275,failed,Customer dropped / not attempted,Wallet
+1024,3100,success,,Card
+1025,540,failed,Bank declined - risk,Card`;
+</script>
+</body>
+</html>
