@@ -69,14 +69,19 @@
   .example-ai .tag{display:inline-block;background:#2a1d5a;color:#c084fc;font-size:11px;font-weight:700;padding:3px 10px;border-radius:999px;margin-bottom:8px}
   .example-ai p{margin:6px 0;font-size:14px} .example-ai .note{color:var(--muted);font-size:12px;margin-top:8px}
   .example-ai ol{margin:6px 0 0;padding-left:20px} .example-ai li{margin:4px 0;font-size:14px}
+  .insight{background:#1a1222;border:1px solid #4a2a3a;border-radius:10px;padding:11px 14px;margin-top:8px;font-size:14px}
+  .insight .seg{color:#f0a0c0;font-weight:700}
+  .insight .srbad{color:var(--danger);font-weight:700}
+  .reco{background:#10251a;border:1px solid #1f5a3a;border-radius:10px;padding:11px 14px;margin-top:10px;font-size:14px}
+  .reco b{color:#4ade80} .reco ul{margin:6px 0 0;padding-left:18px} .reco li{margin:4px 0}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
     <h1>📊 AI Checkout Funnel &amp; Transaction Analyzer</h1>
-    <p>Upload a transactions CSV — instantly see the checkout funnel (initiated → attempted → succeeded), the drop-off at each stage and the biggest leak, plus the failure breakdown and optional AI insights. Replaces the manual pivot-table + VLOOKUP grind.</p>
-    <span class="badge">Checkout funnel</span><span class="badge">Drop-off analysis</span><span class="badge">+ AI insights (Claude)</span>
+    <p>Upload a transactions CSV — instantly see the checkout funnel and drop-off, <b>then let it find the root causes</b>: it breaks success rate down by mode, bank/issuer and amount band to surface the worst-performing segments and hidden patterns, with actionable recommendations. Replaces the manual pivot-table + VLOOKUP grind.</p>
+    <span class="badge">Checkout funnel</span><span class="badge">Root-cause &amp; pattern analysis</span><span class="badge">+ AI insights (Claude)</span>
   </header>
 
   <!-- INPUT -->
@@ -195,6 +200,55 @@ function isNotAttempted(statusVal, reasonVal){
   return NOT_ATTEMPTED_WORDS.some(w=>t.includes(w));
 }
 
+/* ---------- ROOT-CAUSE / PATTERN ANALYTICS ----------
+   Break success rate down by every usable dimension (mode, bank/issuer, amount band)
+   and surface the segments that drag success rate down the most. */
+function analyzeInsights(sCol, rCol){
+  const N = ROWS.length;
+  const isF = r => isFailed(sCol? r[sCol] : '', rCol? r[rCol] : '');
+  const overallFailed = ROWS.filter(isF).length;
+  const overallSR = N ? ((N-overallFailed)/N*100) : 0;
+  const minVol = Math.max(3, Math.ceil(N*0.08));
+
+  const skip = new Set([(sCol||'').toLowerCase(), (rCol||'').toLowerCase(),
+    'order_id','order id','id','txn_id','transaction_id','reference','ref','amount','amt']);
+  const dims = HEADERS.filter(h => !skip.has(h.toLowerCase()));
+  const amtCol = HEADERS.find(h => ['amount','amt'].includes(h.toLowerCase()));
+
+  const segments = [];
+  for(const dim of dims){
+    const map = {};
+    for(const r of ROWS){ const v=(r[dim]||'').trim()||'(blank)'; (map[v]=map[v]||{t:0,f:0}); map[v].t++; if(isF(r)) map[v].f++; }
+    const card = Object.keys(map).length;
+    if(card < 2 || card > 15) continue; // not a useful categorical column
+    for(const [v,o] of Object.entries(map)){
+      if(o.t < minVol) continue;
+      segments.push({dim, value:v, total:o.t, failed:o.f, sr:(o.t-o.f)/o.t*100});
+    }
+  }
+  if(amtCol){
+    const bands=[['< 500',a=>a<500],['500–1000',a=>a>=500&&a<1000],['1000–2500',a=>a>=1000&&a<2500],['≥ 2500',a=>a>=2500]];
+    for(const [label,test] of bands){
+      let t=0,f=0;
+      for(const r of ROWS){ const a=parseFloat(r[amtCol]); if(isNaN(a)||!test(a)) continue; t++; if(isF(r)) f++; }
+      if(t>=minVol) segments.push({dim:'Amount band', value:label, total:t, failed:f, sr:(t-f)/t*100});
+    }
+  }
+  // worst = success rate meaningfully below overall, ranked by lost volume (impact)
+  const worst = segments.filter(s => s.sr <= overallSR - 12 && s.failed >= 2)
+                        .sort((a,b)=> (b.failed - a.failed) || (a.sr - b.sr)).slice(0,3);
+  return {overallSR, worst};
+}
+
+function recoFor(seg){
+  const d = seg.dim.toLowerCase(), v = (seg.value||'').toLowerCase();
+  if(seg.sr === 0) return `<b>${escapeHtml(seg.value)}</b> is failing across the board (0% success) — this looks like an issuer/acquirer/BIN or provisioning issue, not random customer behaviour. Escalate to the PSP/acquirer with sample txns.`;
+  if(d.includes('mode') && v.includes('card')) return `Cards are your weakest mode — check 3DS/OTP success, issuer routing and whether a specific issuer (see below) is dragging it down.`;
+  if(d.includes('bank')||d.includes('issuer')) return `Investigate <b>${escapeHtml(seg.value)}</b> specifically — a single issuer far below average usually means a routing/BIN or issuer-side problem; try routing it to an alternate acquirer.`;
+  if(d.includes('amount')) return `High failure on the <b>${escapeHtml(seg.value)}</b> amount band points to limit/3DS friction — review 3DS step-up and offer EMI/alternate methods there.`;
+  return `Investigate the <b>${escapeHtml(seg.value)}</b> segment — it is well below your overall success rate.`;
+}
+
 /* ---------- ANALYZE ---------- */
 function analyze(){
   if(!ROWS.length) return;
@@ -262,8 +316,19 @@ function analyze(){
   }).join('');
   if(!list.length) rowsHtml = `<tr><td colspan="4" class="muted">No failed transactions found with the selected columns.</td></tr>`;
 
+  // ----- root-cause / pattern insights -----
+  const ins = analyzeInsights(sCol, rCol);
+  const insightsHtml = ins.worst.length ? `
+    <h3 style="margin:2px 0 10px">Root-cause &amp; pattern insights</h3>
+    <p class="small muted" style="margin:-4px 0 10px">Overall success rate ${ins.overallSR.toFixed(1)}%. The segments dragging it down the most:</p>
+    ${ins.worst.map(s=>`<div class="insight">▼ <span class="seg">${escapeHtml(s.dim)} = ${escapeHtml(s.value)}</span>: <span class="srbad">${s.sr.toFixed(1)}% success</span> (${s.failed} of ${s.total} failed) — vs ${ins.overallSR.toFixed(1)}% overall.</div>`).join('')}
+    <div class="reco"><b>Recommended actions</b><ul>${ins.worst.map(s=>`<li>${recoFor(s)}</li>`).join('')}</ul></div>`
+    : `<h3 style="margin:2px 0 10px">Root-cause &amp; pattern insights</h3>
+       <p class="small muted">No single segment stands out — failures are spread fairly evenly. Add a mode / bank / amount column to surface hidden patterns.</p>`;
+
   // keep last summary for AI
-  window.__summary = {total, failed, success, sr, list, notAttempted, attempted, failedAtPsp, biggestLeak};
+  window.__summary = {total, failed, success, sr, list, notAttempted, attempted, failedAtPsp, biggestLeak,
+    overallSR: ins.overallSR, worst: ins.worst};
 
   document.getElementById('out').innerHTML = `
   <div class="card">
@@ -275,6 +340,7 @@ function analyze(){
     </div>
     ${funnelHtml}
   </div>
+  <div class="card">${insightsHtml}</div>
   <div class="card">
     <h3 style="margin:2px 0 10px">Failure breakdown (by reason)</h3>
     <table>
@@ -285,13 +351,14 @@ function analyze(){
     <div class="example-ai">
       <span class="tag">🤖 Example AI insight</span>
       <p><b>Your biggest recoverable loss is at the PSP:</b> 13 of 22 attempts failed after reaching the bank — far more than the 3 checkout drop-offs. Focus there first.</p>
+      <p><b>The hidden pattern:</b> cards on <b>ICICI are 0% success (7/7 failed)</b> — this isn't random customer behaviour, it's an issuer/BIN or routing problem worth escalating to the PSP. Cards overall sit at ~17% vs 36% for the file.</p>
       <p>Priorities:</p>
       <ol>
-        <li><b>Insufficient funds (4)</b> — customer-side; a soft-decline retry prompt and "add money / try another card" nudge recovers a share.</li>
-        <li><b>Do not honour (3)</b> — bank-side; usually fixable by retrying on an alternate acquirer/route, not by the merchant.</li>
-        <li><b>3DS failed (2) + Timeouts (2)</b> — check issuer/ACS health, and run a status-enquiry before marking timeouts failed (money may be debited).</li>
+        <li><b>ICICI cards (0%)</b> — escalate to the PSP/acquirer; try routing ICICI card traffic to an alternate acquirer.</li>
+        <li><b>Insufficient funds</b> — customer-side; a soft-decline retry prompt + "add money / try another card" nudge recovers a share.</li>
+        <li><b>Do not honour</b> — bank-side; retry on an alternate route rather than treating it as a merchant bug.</li>
       </ol>
-      <p class="note">This is a worked example on the sample data to show what the AI layer returns — prioritisation, side-attribution and next steps, not just counts. Add your own Claude key below for live analysis on your file.</p>
+      <p class="note">This is a worked example on the sample data showing what the AI layer adds on top of the computed insights — it reads the patterns and turns them into a prioritised action plan. Add your own Claude key below for live analysis on your file.</p>
     </div>` : ''}
     <details style="margin-top:14px">
       <summary>🤖 Get AI insights &amp; recommendations (Claude)</summary>
@@ -319,8 +386,11 @@ async function askAI(){
   btn.innerHTML = `<span class="spinner"></span>Analyzing...`; aiout.innerHTML='';
 
   const breakdown = s.list.map(([r,c])=>`${r}: ${c} (${((c/s.failed)*100).toFixed(1)}% of failures)`).join('\n');
+  const segs = (s.worst&&s.worst.length)
+    ? s.worst.map(w=>`${w.dim} = ${w.value}: ${w.sr.toFixed(1)}% success (${w.failed}/${w.total} failed) vs ${s.overallSR.toFixed(1)}% overall`).join('\n')
+    : 'No single segment stands out.';
   const prompt =
-`You are a senior payments support engineer. Here is a checkout funnel + failure breakdown:
+`You are a senior payments support engineer. Here is a checkout funnel, failure breakdown and a root-cause segment analysis:
 
 Checkout funnel:
 - Initiated: ${s.total}
@@ -329,14 +399,17 @@ Checkout funnel:
 - Failed at PSP (attempted but failed): ${s.failedAtPsp}
 - Biggest leak stage: ${s.biggestLeak.stage} (${s.biggestLeak.n} lost)
 
+Worst-performing segments (hidden patterns found by breaking success rate down by mode / bank / amount):
+${segs}
+
 Failure reasons:
 ${breakdown}
 
 Write a short analysis for the support/merchant/growth team:
-1) Call out the biggest leak in the funnel and what it means (checkout drop-off vs PSP failure).
-2) The top 2-3 failure reasons to prioritise and why (impact).
-3) For each, whether it's typically customer, merchant/integration, or bank/PSP-side.
-4) Concrete next steps to recover lost transactions.
+1) Lead with the biggest ROOT CAUSE from the segment analysis (e.g. an issuer or mode far below average) and what it likely means.
+2) The biggest funnel leak (checkout drop-off vs PSP failure) and the top failure reasons to prioritise.
+3) For each, whether it's customer, merchant/integration, or bank/PSP-side.
+4) Concrete next steps to lift success rate (routing, retries, 3DS, escalation).
 Keep it under 200 words, practical, bullet points.`;
 
   try{
@@ -355,32 +428,32 @@ Keep it under 200 words, practical, bullet points.`;
 function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 /* ---------- SAMPLE DATA ---------- */
-const SAMPLE = `order_id,amount,status,failure_reason,payment_mode
-1001,1999,success,,UPI
-1002,499,failed,Insufficient funds,Card
-1003,2500,success,,Netbanking
-1004,150,failed,Do not honour,Card
-1005,799,failed,Customer dropped / not attempted,UPI
-1006,1200,success,,UPI
-1007,350,failed,Insufficient funds,Card
-1008,5000,failed,3DS authentication failed,Card
-1009,99,success,,Wallet
-1010,640,failed,Do not honour,Card
-1011,1800,failed,Transaction timed out,Netbanking
-1012,2200,success,,UPI
-1013,450,failed,Invalid VPA,UPI
-1014,760,failed,Insufficient funds,Card
-1015,999,success,,Card
-1016,1299,failed,Customer dropped / not attempted,UPI
-1017,320,failed,3DS authentication failed,Card
-1018,2750,success,,Netbanking
-1019,180,failed,Do not honour,Card
-1020,600,failed,Transaction timed out,UPI
-1021,1450,success,,UPI
-1022,890,failed,Insufficient funds,Card
-1023,275,failed,Customer dropped / not attempted,Wallet
-1024,3100,success,,Card
-1025,540,failed,Bank declined - risk,Card`;
+const SAMPLE = `order_id,amount,status,failure_reason,payment_mode,bank
+1001,1999,success,,UPI,HDFC
+1002,499,failed,Insufficient funds,Card,ICICI
+1003,2500,success,,Netbanking,SBI
+1004,150,failed,Do not honour,Card,ICICI
+1005,799,failed,Customer dropped / not attempted,UPI,HDFC
+1006,1200,success,,UPI,HDFC
+1007,350,failed,Insufficient funds,Card,ICICI
+1008,5000,failed,3DS authentication failed,Card,Axis
+1009,99,success,,Wallet,Paytm
+1010,640,failed,Do not honour,Card,ICICI
+1011,1800,failed,Transaction timed out,Netbanking,Kotak
+1012,2200,success,,UPI,HDFC
+1013,450,failed,Invalid VPA,UPI,Axis
+1014,760,failed,Insufficient funds,Card,SBI
+1015,999,success,,Card,HDFC
+1016,1299,failed,Customer dropped / not attempted,UPI,HDFC
+1017,320,failed,3DS authentication failed,Card,ICICI
+1018,2750,success,,Netbanking,HDFC
+1019,180,failed,Do not honour,Card,ICICI
+1020,600,failed,Transaction timed out,UPI,HDFC
+1021,1450,success,,UPI,Axis
+1022,890,failed,Insufficient funds,Card,ICICI
+1023,275,failed,Customer dropped / not attempted,Wallet,Paytm
+1024,3100,success,,Card,HDFC
+1025,540,failed,Bank declined - risk,Card,SBI`;
 </script>
 </body>
 </html>
