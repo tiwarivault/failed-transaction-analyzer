@@ -3,15 +3,15 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>AI Failed Transaction Analyzer</title>
-<meta name="description" content="Upload a transactions CSV and instantly see the failure breakdown, success rate, and optional AI-written insights." />
+<title>AI Checkout Funnel & Transaction Analyzer</title>
+<meta name="description" content="Upload a transactions CSV and instantly see the checkout funnel (initiated to attempted to succeeded), drop-off at each stage, the biggest leak, the failure breakdown and optional AI insights." />
 <meta property="og:type" content="website" />
 <meta property="og:url" content="https://tiwarivault.github.io/failed-transaction-analyzer/" />
-<meta property="og:title" content="AI Failed Transaction Analyzer" />
-<meta property="og:description" content="Upload a transactions CSV and instantly see the failure breakdown, success rate, and optional AI-written insights. Replaces the manual pivot-table + VLOOKUP grind." />
+<meta property="og:title" content="AI Checkout Funnel & Transaction Analyzer" />
+<meta property="og:description" content="Upload a transactions CSV and instantly see the checkout funnel, drop-off at each stage, the biggest leak, the failure breakdown and optional AI insights. Replaces the manual pivot-table + VLOOKUP grind." />
 <meta name="twitter:card" content="summary" />
-<meta name="twitter:title" content="AI Failed Transaction Analyzer" />
-<meta name="twitter:description" content="Upload a transactions CSV and instantly see the failure breakdown, success rate, and optional AI-written insights." />
+<meta name="twitter:title" content="AI Checkout Funnel & Transaction Analyzer" />
+<meta name="twitter:description" content="Upload a transactions CSV and instantly see the checkout funnel, drop-off, biggest leak and failure breakdown." />
 <style>
   :root{
     --bg:#0f1220; --card:#171a2b; --muted:#9aa3b2; --text:#e9ecf3;
@@ -53,14 +53,26 @@
   .err{color:var(--danger);font-size:13px;margin-top:8px}
   footer{color:var(--muted);font-size:13px;text-align:center;margin-top:30px}
   a{color:var(--accent)}
+  /* funnel */
+  .funnel{margin:6px 0 4px}
+  .stage{margin:10px 0}
+  .stage-top{display:flex;justify-content:space-between;font-size:13px;margin-bottom:5px}
+  .stage-top .lbl{font-weight:600}
+  .stage-top .val{color:var(--muted)}
+  .fbar{height:30px;border-radius:8px;background:linear-gradient(90deg,#5b8cff,#7c3aed);display:flex;align-items:center;padding-left:10px;font-size:13px;font-weight:700;color:#fff;min-width:40px;transition:width .3s}
+  .fbar.s2{background:linear-gradient(90deg,#5b8cff,#4f6fe0)}
+  .fbar.s3{background:linear-gradient(90deg,#22c55e,#16a34a)}
+  .drop{font-size:12px;color:var(--warn);margin:4px 0 0 2px}
+  .leak{background:#2a1512;border:1px solid #5a2a1a;border-radius:10px;padding:12px 14px;margin-top:10px;font-size:14px}
+  .leak b{color:var(--warn)}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <h1>📊 AI Failed Transaction Analyzer</h1>
-    <p>Upload a transactions CSV — instantly see the failure breakdown, success rate, and (optionally) AI-written insights. Replaces the manual pivot-table + VLOOKUP grind.</p>
-    <span class="badge">CSV analysis</span><span class="badge">+ AI insights (Claude)</span>
+    <h1>📊 AI Checkout Funnel &amp; Transaction Analyzer</h1>
+    <p>Upload a transactions CSV — instantly see the checkout funnel (initiated → attempted → succeeded), the drop-off at each stage and the biggest leak, plus the failure breakdown and optional AI insights. Replaces the manual pivot-table + VLOOKUP grind.</p>
+    <span class="badge">Checkout funnel</span><span class="badge">Drop-off analysis</span><span class="badge">+ AI insights (Claude)</span>
   </header>
 
   <!-- INPUT -->
@@ -171,15 +183,24 @@ function isFailed(statusVal, reasonVal){
   return (reasonVal||'').trim() !== '';
 }
 
+// "not attempted" = customer dropped before the payment ever reached the PSP (checkout drop-off)
+const NOT_ATTEMPTED_WORDS = ['not attempted','no attempt','dropped','drop-off','dropoff','abandon','incomplete','not initiated','never attempted'];
+function isNotAttempted(statusVal, reasonVal){
+  const t = ((statusVal||'') + ' ' + (reasonVal||'')).toLowerCase();
+  return NOT_ATTEMPTED_WORDS.some(w=>t.includes(w));
+}
+
 /* ---------- ANALYZE ---------- */
 function analyze(){
   if(!ROWS.length) return;
   const sCol = document.getElementById('statusCol').value;
   const rCol = document.getElementById('reasonCol').value;
   const total = ROWS.length;
-  let failed = 0; const byReason = {};
+  let failed = 0, notAttempted = 0; const byReason = {};
   for(const r of ROWS){
-    const f = isFailed(sCol? r[sCol] : '', rCol? r[rCol] : '');
+    const sv = sCol? r[sCol] : '', rv = rCol? r[rCol] : '';
+    const f = isFailed(sv, rv);
+    if(isNotAttempted(sv, rv)) notAttempted++;
     if(f){
       failed++;
       let reason = rCol ? (r[rCol]||'').trim() : '';
@@ -192,6 +213,37 @@ function analyze(){
   const sr = total ? ((success/total)*100).toFixed(1) : '0';
   const list = Object.entries(byReason).sort((a,b)=>b[1]-a[1]);
   const maxCount = list.length ? list[0][1] : 1;
+
+  // ----- Checkout funnel: Initiated -> Attempted -> Succeeded -----
+  const attempted = total - notAttempted;          // reached the PSP
+  const failedAtPsp = Math.max(attempted - success, 0); // attempted but failed
+  const pct = n => total ? ((n/total)*100).toFixed(1) : '0';
+  const dropInitAtt = total ? ((notAttempted/total)*100).toFixed(1) : '0';
+  const dropAttSucc = attempted ? ((failedAtPsp/attempted)*100).toFixed(1) : '0';
+  const w = n => total ? Math.max(Math.round((n/total)*100), 4) : 4;
+  const biggestLeak = notAttempted >= failedAtPsp
+    ? {stage:'Initiated → Attempted', n:notAttempted, why:'customers dropped off before the payment ever reached the PSP (checkout / not-attempted drop-off)'}
+    : {stage:'Attempted → Succeeded', n:failedAtPsp, why:'payments reached the PSP but failed (declines, 3DS, timeouts, etc.)'};
+
+  const funnelHtml = `
+    <h3 style="margin:2px 0 10px">Checkout funnel</h3>
+    <div class="funnel">
+      <div class="stage">
+        <div class="stage-top"><span class="lbl">Initiated</span><span class="val">${total} · 100%</span></div>
+        <div class="fbar" style="width:100%">${total}</div>
+      </div>
+      <div class="drop">▼ ${notAttempted} dropped before attempting (${dropInitAtt}%)</div>
+      <div class="stage">
+        <div class="stage-top"><span class="lbl">Attempted</span><span class="val">${attempted} · ${pct(attempted)}%</span></div>
+        <div class="fbar s2" style="width:${w(attempted)}%">${attempted}</div>
+      </div>
+      <div class="drop">▼ ${failedAtPsp} failed at the PSP (${dropAttSucc}% of attempts)</div>
+      <div class="stage">
+        <div class="stage-top"><span class="lbl">Succeeded</span><span class="val">${success} · ${pct(success)}%</span></div>
+        <div class="fbar s3" style="width:${w(success)}%">${success}</div>
+      </div>
+    </div>
+    <div class="leak">Biggest leak: <b>${biggestLeak.stage}</b> — ${biggestLeak.n} transactions lost here, where ${biggestLeak.why}.</div>`;
 
   let rowsHtml = list.map(([reason,count])=>{
     const pct = failed ? ((count/failed)*100).toFixed(1) : 0;
@@ -206,16 +258,20 @@ function analyze(){
   if(!list.length) rowsHtml = `<tr><td colspan="4" class="muted">No failed transactions found with the selected columns.</td></tr>`;
 
   // keep last summary for AI
-  window.__summary = {total, failed, success, sr, list};
+  window.__summary = {total, failed, success, sr, list, notAttempted, attempted, failedAtPsp, biggestLeak};
 
   document.getElementById('out').innerHTML = `
   <div class="card">
     <div class="tiles">
-      <div class="tile blue"><div class="n">${total}</div><div class="l">Total txns</div></div>
-      <div class="tile red"><div class="n">${failed}</div><div class="l">Failed</div></div>
+      <div class="tile blue"><div class="n">${total}</div><div class="l">Initiated</div></div>
+      <div class="tile"><div class="n">${attempted}</div><div class="l">Attempted</div></div>
+      <div class="tile green"><div class="n">${success}</div><div class="l">Succeeded</div></div>
       <div class="tile green"><div class="n">${sr}%</div><div class="l">Success rate</div></div>
     </div>
-    <h3 style="margin:6px 0 10px">Failure breakdown (by reason)</h3>
+    ${funnelHtml}
+  </div>
+  <div class="card">
+    <h3 style="margin:2px 0 10px">Failure breakdown (by reason)</h3>
     <table>
       <thead><tr><th>Reason</th><th class="num">Count</th><th class="num">% of failures</th><th>&nbsp;</th></tr></thead>
       <tbody>${rowsHtml}</tbody>
@@ -247,16 +303,24 @@ async function askAI(){
 
   const breakdown = s.list.map(([r,c])=>`${r}: ${c} (${((c/s.failed)*100).toFixed(1)}% of failures)`).join('\n');
   const prompt =
-`You are a senior payments support engineer. Here is a failed-transaction breakdown:
-Total transactions: ${s.total}, Failed: ${s.failed}, Success rate: ${s.sr}%.
+`You are a senior payments support engineer. Here is a checkout funnel + failure breakdown:
+
+Checkout funnel:
+- Initiated: ${s.total}
+- Attempted (reached PSP): ${s.attempted} (dropped before attempting: ${s.notAttempted})
+- Succeeded: ${s.success} (success rate ${s.sr}%)
+- Failed at PSP (attempted but failed): ${s.failedAtPsp}
+- Biggest leak stage: ${s.biggestLeak.stage} (${s.biggestLeak.n} lost)
+
 Failure reasons:
 ${breakdown}
 
-Write a short analysis for the support/merchant team:
-1) The top 2-3 issues to prioritise and why (impact).
-2) For each, whether it's typically customer, merchant/integration, or bank/PSP-side.
-3) Concrete next steps to reduce failures.
-Keep it under 180 words, practical, bullet points.`;
+Write a short analysis for the support/merchant/growth team:
+1) Call out the biggest leak in the funnel and what it means (checkout drop-off vs PSP failure).
+2) The top 2-3 failure reasons to prioritise and why (impact).
+3) For each, whether it's typically customer, merchant/integration, or bank/PSP-side.
+4) Concrete next steps to recover lost transactions.
+Keep it under 200 words, practical, bullet points.`;
 
   try{
     const res = await fetch('https://api.anthropic.com/v1/messages', {
