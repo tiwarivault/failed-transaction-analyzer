@@ -65,6 +65,10 @@
   .drop{font-size:12px;color:var(--warn);margin:4px 0 0 2px}
   .leak{background:#2a1512;border:1px solid #5a2a1a;border-radius:10px;padding:12px 14px;margin-top:10px;font-size:14px}
   .leak b{color:var(--warn)}
+  .example-ai{background:#161033;border:1px solid #3a2a6a;border-radius:10px;padding:14px;margin-top:16px}
+  .example-ai .tag{display:inline-block;background:#2a1d5a;color:#c084fc;font-size:11px;font-weight:700;padding:3px 10px;border-radius:999px;margin-bottom:8px}
+  .example-ai p{margin:6px 0;font-size:14px} .example-ai .note{color:var(--muted);font-size:12px;margin-top:8px}
+  .example-ai ol{margin:6px 0 0;padding-left:20px} .example-ai li{margin:4px 0;font-size:14px}
 </style>
 </head>
 <body>
@@ -112,6 +116,7 @@
 <script>
 let ROWS = [];      // array of objects
 let HEADERS = [];   // column names
+let SAMPLE_LOADED = false; // show an example AI insight only for the built-in sample
 
 /* ---------- CSV PARSER (handles basic quoted fields) ---------- */
 function parseCSV(text){
@@ -148,11 +153,11 @@ function toObjects(matrix){
 function loadFile(e){
   const f = e.target.files[0]; if(!f) return;
   const reader = new FileReader();
-  reader.onload = () => ingest(reader.result);
+  reader.onload = () => { SAMPLE_LOADED = false; ingest(reader.result); };
   reader.readAsText(f);
 }
-function loadPaste(){ const t=document.getElementById('paste').value.trim(); if(t) ingest(t); }
-function loadSample(){ ingest(SAMPLE); }
+function loadPaste(){ const t=document.getElementById('paste').value.trim(); if(t){ SAMPLE_LOADED = false; ingest(t); } }
+function loadSample(){ SAMPLE_LOADED = true; ingest(SAMPLE); }
 function clearAll(){ ROWS=[]; HEADERS=[]; document.getElementById('mapCard').style.display='none'; document.getElementById('out').innerHTML=''; document.getElementById('file').value=''; }
 
 function ingest(text){
@@ -276,6 +281,18 @@ function analyze(){
       <thead><tr><th>Reason</th><th class="num">Count</th><th class="num">% of failures</th><th>&nbsp;</th></tr></thead>
       <tbody>${rowsHtml}</tbody>
     </table>
+    ${SAMPLE_LOADED ? `
+    <div class="example-ai">
+      <span class="tag">🤖 Example AI insight</span>
+      <p><b>Your biggest recoverable loss is at the PSP:</b> 13 of 22 attempts failed after reaching the bank — far more than the 3 checkout drop-offs. Focus there first.</p>
+      <p>Priorities:</p>
+      <ol>
+        <li><b>Insufficient funds (4)</b> — customer-side; a soft-decline retry prompt and "add money / try another card" nudge recovers a share.</li>
+        <li><b>Do not honour (3)</b> — bank-side; usually fixable by retrying on an alternate acquirer/route, not by the merchant.</li>
+        <li><b>3DS failed (2) + Timeouts (2)</b> — check issuer/ACS health, and run a status-enquiry before marking timeouts failed (money may be debited).</li>
+      </ol>
+      <p class="note">This is a worked example on the sample data to show what the AI layer returns — prioritisation, side-attribution and next steps, not just counts. Add your own Claude key below for live analysis on your file.</p>
+    </div>` : ''}
     <details style="margin-top:14px">
       <summary>🤖 Get AI insights &amp; recommendations (Claude)</summary>
       <div style="margin-top:10px">
